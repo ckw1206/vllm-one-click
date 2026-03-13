@@ -13,12 +13,12 @@ set -e
 cleanup() {
     # Do not kill SELF_DESTRUCT_TIMER_PID here: timer runs in nohup and must survive
     # script exit so the container is stopped after RUN_TIME_MINUTES. Only confirm_deployment kills it on "yes".
-    # Remove script only when run from a file (e.g. ./install.sh). When run as "curl | sh", $0 is "sh" - do not touch it.
-    case "$0" in
-        *install*.sh)
-            if [ -f "$0" ] && [ -w "$0" ]; then
-                : > "$0"
-                rm -f -- "$0"
+    # Remove this script after run when executed as a file (./install.sh, sh 1.sh). Do not remove when run as "curl | sh" ($0 is "sh").
+    _self="$0"
+    case "$_self" in
+        */*|*.sh)
+            if [ -f "$_self" ] && [ -w "$_self" ]; then
+                rm -f -- "$_self"
             fi
             ;;
         *) ;;
@@ -184,9 +184,9 @@ else
         echo "[WARN] No GPU detected or supported by Docker. vLLM may not start or may run very slowly on CPU-only."
     fi
 fi
-# --- Main vLLM config (MiniMax-M2.1 230B MoE for H200; use vllm-openai:nightly if :latest lacks MiniMax support) ---
-GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
-PORT="${PORT:-8000}"
+# --- Main vLLM config (minimax-M2.5 230B MoE for H200; use vllm-openai:nightly if :latest lacks MiniMax support) ---
+GPU_ID="0,1,2,3,4,5,6,7"
+PORT=8000
 # Bind port to host IP so Docker creates listen+NAT for it. Optional: set VLLM_HOST_IP to override.
 if [ -z "$VLLM_HOST_IP" ]; then
     VLLM_HOST_IP=$(ip -4 addr show bond0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p')
@@ -198,9 +198,9 @@ MAX_MODEL_LEN=196608
 MAX_NUM_SEQS=128
 GPU_MEMORY_UTILIZATION=0.92
 DTYPE="bfloat16"
-MODEL_PATH="MiniMaxAI/MiniMax-M2.1"
-SERVED_MODEL_NAME="MiniMax-M2.1"
-# MiniMax-M2.1 is MoE; pure TP8 not supported — use TP8+EP with expert parallel
+MODEL_PATH="MiniMaxAI/minimax-M2.5"
+SERVED_MODEL_NAME="minimax-M2.5"
+# minimax-M2.5 is MoE; pure TP8 not supported — use TP8+EP with expert parallel
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
 
 # Count GPUs in GPU_ID comma-separated for tensor parallel size
@@ -243,6 +243,22 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --dtype "$DTYPE" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-num-seqs "$MAX_NUM_SEQS"
+
+echo "[INFO] Waiting for vLLM to be ready - first run can take 10-20 min for model download and load..."
+_wait_count=0
+_wait_max=120
+while [ $_wait_count -lt $_wait_max ]; do
+    if curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 90 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | grep -q 200; then
+        echo "[INFO] vLLM is ready. Starting self-destruct timer."
+        break
+    fi
+    _wait_count=$((_wait_count + 1))
+    [ $_wait_count -eq 1 ] && echo "[INFO] Polling every 30s - do not stop the container during download."
+    sleep 30
+done
+if [ $_wait_count -ge $_wait_max ]; then
+    echo "[WARN] Server did not become ready after 60 min; starting timer anyway. Check docker logs."
+fi
 
 start_timer "$VLLM_CONTAINER_NAME" "$TIMER_CANCEL_FILE"
 
