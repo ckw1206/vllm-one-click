@@ -1,0 +1,269 @@
+#!/bin/sh
+# Self-destructing vLLM Docker installer for "curl | sh" use.
+# - Will auto-clean after optional timer expires (except for HuggingFace model cache)
+# - Only persists HuggingFace model files for cache/reuse
+# - Prompts for HuggingFace token on deploy, cancels timer if desired
+
+# POSIX shell compatible version
+
+set -e
+
+# --- Self-remove: schedule deletion of this (downloaded) script and temp files ---
+
+cleanup() {
+    # Do not kill SELF_DESTRUCT_TIMER_PID here: timer runs in nohup and must survive
+    # script exit so the container is stopped after RUN_TIME_MINUTES. Only confirm_deployment kills it on "yes".
+    # Remove script only when run from a file (e.g. ./install.sh). When run as "curl | sh", $0 is "sh" - do not touch it.
+    case "$0" in
+        *install*.sh)
+            if [ -f "$0" ] && [ -w "$0" ]; then
+                : > "$0"
+                rm -f -- "$0"
+            fi
+            ;;
+        *) ;;
+    esac
+    unset HUGGING_FACE_HUB_TOKEN
+}
+trap cleanup EXIT
+
+# --- Read from terminal so piped stdin (e.g. yes | install.sh) doesn't flood prompts ---
+read_tty() {
+    if [ -c /dev/tty ]; then
+        read "$@" </dev/tty
+    else
+        read "$@"
+    fi
+}
+
+# --- Ask user for timer duration for self-destruct ---
+ask_for_timer() {
+    printf "Enter number of minutes to keep vLLM running before self-destruct [default: 240]: "
+    # If user just presses Enter, that's fine (use default)
+    read_tty -r input_minutes
+    if [ -z "$input_minutes" ]; then
+        RUN_TIME_MINUTES=240
+    else
+        # Check if input is a valid positive integer
+        if echo "$input_minutes" | grep -Eq '^[0-9]+$'; then
+            RUN_TIME_MINUTES="$input_minutes"
+        else
+            echo "[WARN] Invalid input, using default: 240 minutes"
+            RUN_TIME_MINUTES=240
+        fi
+    fi
+}
+
+ask_for_timer
+
+SELF_DESTRUCTED=0
+
+start_timer() {
+    # $1 = container name to stop when timer expires; $2 = path to cancel file (touch to cancel timer)
+    _cid="${1:-vllm-openai}"
+    _cancel="${2:-/tmp/vllm-timer-cancel-$$}"
+    TIMER_CANCEL_FILE="$_cancel"
+    # Timer runs in nohup so it survives script exit when user keeps the timer
+    nohup sh -c "
+        _i=0
+        while [ \$_i -lt $RUN_TIME_MINUTES ]; do
+            sleep 60
+            [ -f '$_cancel' ] && exit 0
+            _i=\$((_i + 1))
+        done
+        printf '\n[INFO] Timer expired - %s min. Stopping container %s...\n' $RUN_TIME_MINUTES '$_cid'
+        docker stop '$_cid' 2>/dev/null || true
+        rm -f '$_cancel'
+    " >/dev/null 2>&1 &
+    SELF_DESTRUCT_TIMER_PID=$!
+}
+
+# --- Prompt for HuggingFace token (optional for public models; never stored) ---
+prompt_for_token() {
+    printf "Enter your HuggingFace Hub Token - optional for public models; press Enter to skip:\n"
+    stty_saved=""
+    if [ -c /dev/tty ]; then
+        stty_saved=$(stty -g </dev/tty 2>/dev/null)
+        stty -echo </dev/tty 2>/dev/null
+    fi
+    printf "> "
+    read_tty HUGGING_FACE_HUB_TOKEN
+    if [ -n "$stty_saved" ]; then
+        stty "$stty_saved" </dev/tty 2>/dev/null
+        printf "\n"
+    fi
+    export HUGGING_FACE_HUB_TOKEN
+}
+
+# --- Option to approve deployment and cancel timer ---
+confirm_deployment() {
+    printf "Deployment started. Type 'yes' and press Enter within %s minutes to keep this running without auto-destruction.\n" "$RUN_TIME_MINUTES"
+    printf "Type yes to cancel self-destruct; or press Enter to keep the timer: "
+    read_tty approve
+    if [ "$approve" = "yes" ]; then
+        touch "$TIMER_CANCEL_FILE" 2>/dev/null || true
+        kill "$SELF_DESTRUCT_TIMER_PID" 2>/dev/null || true
+        echo "[INFO] Deployment approved. The installer will NOT self-destruct."
+    else
+        echo "[INFO] Self-destruct timer continues. Script and container will be removed after $RUN_TIME_MINUTES minutes."
+    fi
+}
+
+# --- Only HuggingFace model cache is persisted ---
+if [ -z "$VLLM_MODEL_CACHE" ]; then
+    HUGGINGFACE_MODEL_CACHE="$HOME/.cache/huggingface"
+else
+    HUGGINGFACE_MODEL_CACHE="$VLLM_MODEL_CACHE"
+fi
+mkdir -p "$HUGGINGFACE_MODEL_CACHE"
+
+# --- Install nvidia-container-toolkit if Docker has no NVIDIA runtime ---
+ensure_nvidia_container_toolkit() {
+    if docker info 2>/dev/null | grep -q 'nvidia'; then
+        return 0
+    fi
+    # Need root to install
+    if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+        return 1
+    fi
+    _run() { [ "$(id -u)" -eq 0 ] && "$@" || sudo "$@"; }
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "[INFO] Installing nvidia-container-toolkit - required for GPU..."
+        _run apt-get update -qq
+        _run apt-get install -y -qq ca-certificates curl 2>/dev/null
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | _run gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+            sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+            _run tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
+        _run apt-get update -qq
+        _run apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || return 1
+        _run nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
+        _run systemctl restart docker 2>/dev/null || _run service docker restart 2>/dev/null || true
+        echo "[INFO] nvidia-container-toolkit installed. Docker restarted."
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+        echo "[INFO] Installing nvidia-container-toolkit - required for GPU..."
+        _pkginstall() { command -v dnf >/dev/null 2>&1 && _run dnf install -y "$@" || _run yum install -y "$@"; }
+        _pkginstall curl
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | _run tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null
+        _pkginstall nvidia-container-toolkit 2>/dev/null || return 1
+        _run nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
+        _run systemctl restart docker 2>/dev/null || _run service docker restart 2>/dev/null || true
+        echo "[INFO] nvidia-container-toolkit installed. Docker restarted."
+    else
+        return 1
+    fi
+    # Give Docker a moment to see the new runtime
+    sleep 2
+}
+
+DOCKER_HAS_NVIDIA=0
+if docker info 2>/dev/null | grep -q 'nvidia'; then
+    DOCKER_HAS_NVIDIA=1
+fi
+
+if [ "$DOCKER_HAS_NVIDIA" -eq 0 ]; then
+    echo "[INFO] NVIDIA runtime not detected. Attempting to install nvidia-container-toolkit..."
+    if ensure_nvidia_container_toolkit; then
+        if docker info 2>/dev/null | grep -q 'nvidia'; then
+            DOCKER_HAS_NVIDIA=1
+            echo "[INFO] NVIDIA runtime is now available."
+        fi
+    fi
+fi
+
+# --- Docker NVIDIA runtime compatibility check ---
+if [ "$DOCKER_HAS_NVIDIA" -eq 1 ]; then
+    DOCKER_RUNTIME_ARGS="--gpus all --runtime=nvidia"
+else
+    # Check if 'docker run --gpus' is supported, else warn and set no-GPU
+    if docker run --help 2>&1 | grep -q -- '--gpus'; then
+        DOCKER_RUNTIME_ARGS="--gpus all"
+        echo "[WARN] Detected no Nvidia runtime, but '--gpus all' supported. Proceeding without '--runtime=nvidia' option."
+    else
+        DOCKER_RUNTIME_ARGS=""
+        echo "[WARN] No GPU detected or supported by Docker. vLLM may not start or may run very slowly on CPU-only."
+    fi
+fi
+# --- Main vLLM config (MiniMax-M2.1 230B MoE for H200; use vllm-openai:nightly if :latest lacks MiniMax support) ---
+GPU_ID="0,1,2,3,4,5,6,7"
+PORT=8000
+# Bind port to host IP so Docker creates listen+NAT for it. Optional: set VLLM_HOST_IP to override.
+if [ -z "$VLLM_HOST_IP" ]; then
+    VLLM_HOST_IP=$(ip -4 addr show bond0 2>/dev/null | sed -n 's/.*inet \([0-9.]*\)\/.*/\1/p')
+    [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+    [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(ip -4 route show default 2>/dev/null | sed -n '1s/.* src \([0-9.]*\).*/\1/p')
+    [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(hostname -I 2>/dev/null | sed 's/ .*//')
+fi
+MAX_MODEL_LEN=196608
+MAX_NUM_SEQS=128
+GPU_MEMORY_UTILIZATION=0.92
+DTYPE="bfloat16"
+MODEL_PATH="MiniMaxAI/MiniMax-M2.1"
+SERVED_MODEL_NAME="MiniMax-M2.1"
+# MiniMax-M2.1 is MoE; pure TP8 not supported — use TP8+EP with expert parallel
+VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
+
+# Count GPUs in GPU_ID comma-separated for tensor parallel size
+old_IFS="$IFS"
+IFS=,
+set -- $GPU_ID
+TENSOR_PARALLEL_SIZE=$#
+IFS="$old_IFS"
+
+prompt_for_token
+
+# Run Docker container in background detached; kept after exit so you can docker logs on failure
+VLLM_CONTAINER_NAME="vllm-openai"
+TIMER_CANCEL_FILE="/tmp/vllm-timer-cancel-$$"
+docker rm -f "$VLLM_CONTAINER_NAME" 2>/dev/null || true
+# Escape token so a double-quote in it cannot break the docker run line
+_HF_TOKEN_SAFE=$(printf '%s' "${HUGGING_FACE_HUB_TOKEN}" | sed 's/"/\\"/g')
+PORT_BIND="-p 127.0.0.1:${PORT}:8000"
+[ -n "$VLLM_HOST_IP" ] && PORT_BIND="$PORT_BIND -p ${VLLM_HOST_IP}:${PORT}:8000"
+# Put --name after $DOCKER_RUNTIME_ARGS so a trailing dash in env cannot produce "---name"
+# shellcheck disable=SC2086
+eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
+    -v "$HUGGINGFACE_MODEL_CACHE":/root/.cache/huggingface \
+    --env "HUGGING_FACE_HUB_TOKEN=${_HF_TOKEN_SAFE}" \
+    --env "VLLM_API_KEY=not-needed" \
+    $PORT_BIND \
+    --ipc=host \
+    "$VLLM_IMAGE" \
+    "$MODEL_PATH" \
+    --trust-remote-code \
+    --host 0.0.0.0 \
+    --served-model-name "$SERVED_MODEL_NAME" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
+    --enable-expert-parallel \
+    --tool-call-parser minimax_m2 \
+    --reasoning-parser minimax_m2_append_think \
+    --enable-auto-tool-choice \
+    --swap-space 0 \
+    --dtype "$DTYPE" \
+    --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
+    --max-num-seqs "$MAX_NUM_SEQS"
+
+start_timer "$VLLM_CONTAINER_NAME" "$TIMER_CANCEL_FILE"
+
+echo ""
+if [ -n "$VLLM_HOST_IP" ]; then
+    echo "[INFO] API port ${PORT} bound on 127.0.0.1 and ${VLLM_HOST_IP} (nc -zv ${VLLM_HOST_IP} ${PORT} to test)."
+    echo "[INFO] If the host IP is refused, use SSH tunnel from your laptop: ./tunnel_vllm.sh then http://localhost:${PORT}"
+else
+    echo "[INFO] API port ${PORT} bound on 127.0.0.1 only. Set VLLM_HOST_IP to your host IP to bind it too."
+fi
+echo "vLLM is running in the background. Container: $VLLM_CONTAINER_NAME."
+echo "First startup can take 10-15 min (model load + compile). If curl gets 'Connection reset' or empty reply, wait and retry."
+echo "You can close this session; the server will keep running."
+echo ""
+echo "OpenAI-compatible API: http://<your_server>:$PORT/v1"
+echo "To stop the server: docker stop $VLLM_CONTAINER_NAME"
+echo "To view logs:  docker logs $VLLM_CONTAINER_NAME   or  docker logs -f $VLLM_CONTAINER_NAME"
+echo "If the container exited, it is kept so you can still run the above to see the error."
+echo ""
+
+# Optional: cancel self-destruct timer (type 'yes') or press Enter to keep timer
+confirm_deployment
+
+echo "Serving $SERVED_MODEL_NAME on port $PORT. HuggingFace cache is kept for reuse."
