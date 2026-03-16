@@ -37,7 +37,13 @@ read_tty() {
 }
 
 # --- Ask user for timer duration for self-destruct ---
+# Set VLLM_NO_SELF_DESTRUCT=1 to disable the timer entirely (container runs until you docker stop it).
 ask_for_timer() {
+    if [ -n "$VLLM_NO_SELF_DESTRUCT" ]; then
+        RUN_TIME_MINUTES=0
+        echo "[INFO] Self-destruct timer disabled (VLLM_NO_SELF_DESTRUCT is set). Container will run until you stop it."
+        return
+    fi
     printf "Enter number of minutes to keep vLLM running before self-destruct [default: 240]: "
     # If user just presses Enter, that's fine (use default)
     read_tty -r input_minutes
@@ -59,10 +65,19 @@ ask_for_timer
 SELF_DESTRUCTED=0
 
 start_timer() {
+    # No timer when disabled via VLLM_NO_SELF_DESTRUCT
+    [ "$RUN_TIME_MINUTES" -eq 0 ] 2>/dev/null && return 0
     # $1 = container name to stop when timer expires; $2 = path to cancel file (touch to cancel timer)
     _cid="${1:-vllm-openai}"
     _cancel="${2:-/tmp/vllm-timer-cancel-$$}"
     TIMER_CANCEL_FILE="$_cancel"
+    # Kill any leftover timer from a previous run (nohup survives script/terminal; old timer would stop current container)
+    _pidfile="/tmp/vllm-timer-pid-$_cid"
+    if [ -f "$_pidfile" ]; then
+        _oldpid=$(cat "$_pidfile" 2>/dev/null)
+        kill "$_oldpid" 2>/dev/null || true
+        rm -f "$_pidfile"
+    fi
     # Timer runs in nohup so it survives script exit when user keeps the timer
     nohup sh -c "
         _i=0
@@ -76,6 +91,7 @@ start_timer() {
         rm -f '$_cancel'
     " >/dev/null 2>&1 &
     SELF_DESTRUCT_TIMER_PID=$!
+    echo "$SELF_DESTRUCT_TIMER_PID" > "$_pidfile"
 }
 
 # --- Prompt for HuggingFace token (optional for public models; never stored) ---
@@ -97,12 +113,17 @@ prompt_for_token() {
 
 # --- Option to approve deployment and cancel timer ---
 confirm_deployment() {
+    if [ "$RUN_TIME_MINUTES" -eq 0 ] 2>/dev/null; then
+        echo "[INFO] No self-destruct timer. Container will keep running until you run: docker stop $VLLM_CONTAINER_NAME"
+        return 0
+    fi
     printf "Deployment started. Type 'yes' and press Enter within %s minutes to keep this running without auto-destruction.\n" "$RUN_TIME_MINUTES"
     printf "Type yes to cancel self-destruct; or press Enter to keep the timer: "
     read_tty approve
     if [ "$approve" = "yes" ]; then
         touch "$TIMER_CANCEL_FILE" 2>/dev/null || true
         kill "$SELF_DESTRUCT_TIMER_PID" 2>/dev/null || true
+        rm -f "/tmp/vllm-timer-pid-$VLLM_CONTAINER_NAME" 2>/dev/null || true
         echo "[INFO] Deployment approved. The installer will NOT self-destruct."
     else
         echo "[INFO] Self-destruct timer continues. Script and container will be removed after $RUN_TIME_MINUTES minutes."
@@ -117,6 +138,55 @@ else
 fi
 mkdir -p "$HUGGINGFACE_MODEL_CACHE"
 
+# --- Install Docker if not present ---
+ensure_docker() {
+    if command -v docker >/dev/null 2>&1; then
+        return 0
+    fi
+    if [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+        echo "[ERROR] Docker not found and cannot install without root/sudo."
+        return 1
+    fi
+    _run() { [ "$(id -u)" -eq 0 ] && "$@" || sudo "$@"; }
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "[INFO] Docker not found. Installing Docker..."
+        echo "[INFO] Step 1/6: apt update and install ca-certificates, curl..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+        _run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl 2>/dev/null || true
+        echo "[INFO] Step 2/6: adding Docker GPG key..."
+        _run install -m 0755 -d /etc/apt/keyrings
+        _run curl -fsSL --connect-timeout 30 --max-time 60 https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        _run chmod a+r /etc/apt/keyrings/docker.asc
+        echo "[INFO] Step 3/6: adding Docker repository..."
+        _suite="noble"
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            _suite="${UBUNTU_CODENAME:-$VERSION_CODENAME}"
+            [ -z "$_suite" ] && _suite="noble"
+        fi
+        {
+            echo "Types: deb"
+            echo "URIs: https://download.docker.com/linux/ubuntu"
+            echo "Suites: $_suite"
+            echo "Components: stable"
+            echo "Signed-By: /etc/apt/keyrings/docker.asc"
+        } | _run tee /etc/apt/sources.list.d/docker.sources >/dev/null
+        echo "[INFO] Step 4/6: apt update..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+        echo "[INFO] Step 5/6: installing Docker packages..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || return 1
+        echo "[INFO] Step 6/6: starting Docker..."
+        _run systemctl start docker 2>/dev/null || _run service docker start 2>/dev/null || true
+        echo "[INFO] Docker installed and started."
+    elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
+        echo "[INFO] Docker not found. On RHEL/CentOS please install Docker first (e.g. dnf install docker-ce) then re-run this script."
+        return 1
+    else
+        echo "[ERROR] Docker not found and no supported package manager to install it."
+        return 1
+    fi
+}
+
 # --- Install nvidia-container-toolkit if Docker has no NVIDIA runtime ---
 ensure_nvidia_container_toolkit() {
     if docker info 2>/dev/null | grep -q 'nvidia'; then
@@ -129,23 +199,34 @@ ensure_nvidia_container_toolkit() {
     _run() { [ "$(id -u)" -eq 0 ] && "$@" || sudo "$@"; }
     if command -v apt-get >/dev/null 2>&1; then
         echo "[INFO] Installing nvidia-container-toolkit - required for GPU..."
-        _run apt-get update -qq
-        _run apt-get install -y -qq ca-certificates curl 2>/dev/null
-        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | _run gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
-        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        echo "[INFO] Step 1/7: apt-get update..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+        echo "[INFO] Step 2/7: installing ca-certificates and curl..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl 2>/dev/null || true
+        echo "[INFO] Step 3/7: adding NVIDIA repo GPG key..."
+        curl -fsSL --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/gpgkey | _run gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null
+        echo "[INFO] Step 4/7: adding NVIDIA repo list..."
+        curl -s -L --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
             sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
             _run tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null
-        _run apt-get update -qq
-        _run apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || return 1
+        echo "[INFO] Step 5/7: apt-get update (NVIDIA repo)..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+        echo "[INFO] Step 6/7: installing nvidia-container-toolkit..."
+        _run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nvidia-container-toolkit 2>/dev/null || return 1
+        echo "[INFO] Step 7/7: configuring runtime and restarting Docker (may take 1–2 min)..."
         _run nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
         _run systemctl restart docker 2>/dev/null || _run service docker restart 2>/dev/null || true
         echo "[INFO] nvidia-container-toolkit installed. Docker restarted."
     elif command -v yum >/dev/null 2>&1 || command -v dnf >/dev/null 2>&1; then
         echo "[INFO] Installing nvidia-container-toolkit - required for GPU..."
         _pkginstall() { command -v dnf >/dev/null 2>&1 && _run dnf install -y "$@" || _run yum install -y "$@"; }
+        echo "[INFO] Step 1/5: installing curl..."
         _pkginstall curl
-        curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | _run tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null
+        echo "[INFO] Step 2/5: adding NVIDIA repo..."
+        curl -s -L --connect-timeout 30 --max-time 60 https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo | _run tee /etc/yum.repos.d/nvidia-container-toolkit.repo >/dev/null
+        echo "[INFO] Step 3/5: installing nvidia-container-toolkit..."
         _pkginstall nvidia-container-toolkit 2>/dev/null || return 1
+        echo "[INFO] Step 4/5: configuring runtime and restarting Docker (may take 1–2 min)..."
         _run nvidia-ctk runtime configure --runtime=docker 2>/dev/null || true
         _run systemctl restart docker 2>/dev/null || _run service docker restart 2>/dev/null || true
         echo "[INFO] nvidia-container-toolkit installed. Docker restarted."
@@ -155,6 +236,14 @@ ensure_nvidia_container_toolkit() {
     # Give Docker a moment to see the new runtime
     sleep 2
 }
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "[INFO] Docker not detected. Attempting to install Docker..."
+    if ! ensure_docker; then
+        echo "[ERROR] Could not install Docker. Please install Docker and re-run this script."
+        exit 1
+    fi
+fi
 
 DOCKER_HAS_NVIDIA=0
 if docker info 2>/dev/null | grep -q 'nvidia'; then
@@ -226,6 +315,7 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     -v "$HUGGINGFACE_MODEL_CACHE":/root/.cache/huggingface \
     --env "HUGGING_FACE_HUB_TOKEN=${_HF_TOKEN_SAFE}" \
     --env "VLLM_API_KEY=not-needed" \
+    --env "VLLM_FLOAT32_MATMUL_PRECISION=high" \
     $PORT_BIND \
     --ipc=host \
     "$VLLM_IMAGE" \
@@ -243,22 +333,6 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --dtype "$DTYPE" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-num-seqs "$MAX_NUM_SEQS"
-
-echo "[INFO] Waiting for vLLM to be ready - first run can take 10-20 min for model download and load..."
-_wait_count=0
-_wait_max=120
-while [ $_wait_count -lt $_wait_max ]; do
-    if curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 --max-time 90 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null | grep -q 200; then
-        echo "[INFO] vLLM is ready. Starting self-destruct timer."
-        break
-    fi
-    _wait_count=$((_wait_count + 1))
-    [ $_wait_count -eq 1 ] && echo "[INFO] Polling every 30s - do not stop the container during download."
-    sleep 30
-done
-if [ $_wait_count -ge $_wait_max ]; then
-    echo "[WARN] Server did not become ready after 60 min; starting timer anyway. Check docker logs."
-fi
 
 start_timer "$VLLM_CONTAINER_NAME" "$TIMER_CANCEL_FILE"
 
