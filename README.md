@@ -1,4 +1,4 @@
-# vLLM Test
+# vLLM One-Click Deployment
 
 Client utilities for testing a remote vLLM OpenAI-compatible API server.
 
