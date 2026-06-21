@@ -283,7 +283,6 @@ if [ -z "$VLLM_HOST_IP" ]; then
     [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(ip -4 route show default 2>/dev/null | sed -n '1s/.* src \([0-9.]*\).*/\1/p')
     [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(hostname -I 2>/dev/null | sed 's/ .*//')
 fi
-MAX_MODEL_LEN=196608
 MAX_NUM_SEQS=128
 GPU_MEMORY_UTILIZATION=0.92
 DTYPE="bfloat16"
@@ -324,7 +323,7 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --trust-remote-code \
     --host 0.0.0.0 \
     --served-model-name "$SERVED_MODEL_NAME" \
-    --max-model-len "$MAX_MODEL_LEN" \
+    --max-model-len 131072 \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --enable-expert-parallel \
     --block-size 128 \
