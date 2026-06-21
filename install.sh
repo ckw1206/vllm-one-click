@@ -273,7 +273,7 @@ else
         echo "[WARN] No GPU detected or supported by Docker. vLLM may not start or may run very slowly on CPU-only."
     fi
 fi
-# --- Main vLLM config (MiniMax-M2.7 229B MoE for H200; use vllm-openai:nightly if :latest lacks MiniMax support) ---
+# --- Main vLLM config (MiniMax-M3) ---
 GPU_ID="0,1,2,3,4,5,6,7"
 PORT=8000
 # Bind port to host IP so Docker creates listen+NAT for it. Optional: set VLLM_HOST_IP to override.
@@ -287,8 +287,9 @@ MAX_MODEL_LEN=196608
 MAX_NUM_SEQS=128
 GPU_MEMORY_UTILIZATION=0.92
 DTYPE="bfloat16"
-MODEL_PATH="MiniMaxAI/MiniMax-M2.7"
-SERVED_MODEL_NAME="MiniMax-M2.7"
+# Use MiniMax-M3 from HuggingFace
+MODEL_PATH="MiniMaxAI/MiniMax-M3"
+SERVED_MODEL_NAME="MiniMax-M3"
 # MiniMax-M2.7 is MoE; pure TP8 not supported — use TP8+EP with expert parallel
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
 
