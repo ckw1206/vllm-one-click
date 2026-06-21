@@ -286,9 +286,9 @@ fi
 MAX_NUM_SEQS=128
 GPU_MEMORY_UTILIZATION=0.92
 DTYPE="bfloat16"
-# Use MiniMax-M3 from HuggingFace
-MODEL_PATH="MiniMaxAI/MiniMax-M3"
-SERVED_MODEL_NAME="MiniMax-M3"
+# Use MiniMax-M3-MXFP8 (FP8 variant) from HuggingFace
+MODEL_PATH="MiniMaxAI/MiniMax-M3-MXFP8"
+SERVED_MODEL_NAME="MiniMax-M3-MXFP8"
 # MiniMax-M3 uses expert parallel
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:minimax-m3}"
 
@@ -327,6 +327,7 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --enable-expert-parallel \
     --block-size 128 \
+    --kv-cache-dtype fp8 \
     --tool-call-parser minimax_m3 \
     --reasoning-parser minimax_m3 \
     --enable-auto-tool-choice \
