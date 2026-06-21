@@ -323,7 +323,8 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --trust-remote-code \
     --host 0.0.0.0 \
     --served-model-name "$SERVED_MODEL_NAME" \
-    --max-model-len 131072 \
+    --max-model-len 196608 \
+    --kv-cache-dtype fp8 \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --enable-expert-parallel \
     --block-size 128 \
