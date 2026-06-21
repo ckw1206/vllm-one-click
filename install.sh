@@ -283,8 +283,8 @@ if [ -z "$VLLM_HOST_IP" ]; then
     [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(ip -4 route show default 2>/dev/null | sed -n '1s/.* src \([0-9.]*\).*/\1/p')
     [ -z "$VLLM_HOST_IP" ] && VLLM_HOST_IP=$(hostname -I 2>/dev/null | sed 's/ .*//')
 fi
-MAX_NUM_SEQS=32
-GPU_MEMORY_UTILIZATION=0.92
+MAX_NUM_SEQS=16
+GPU_MEMORY_UTILIZATION=0.85
 DTYPE="bfloat16"
 # Use MiniMax-M3 from HuggingFace (MXFP8 variant also requires BF16-only kernels)
 MODEL_PATH="MiniMaxAI/MiniMax-M3"
@@ -323,7 +323,7 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --trust-remote-code \
     --host 0.0.0.0 \
     --served-model-name "$SERVED_MODEL_NAME" \
-    --max-model-len 196608 \
+    --max-model-len 163840 \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --enable-expert-parallel \
     --block-size 128 \
