@@ -290,7 +290,7 @@ DTYPE="bfloat16"
 # Use MiniMax-M3 from HuggingFace
 MODEL_PATH="MiniMaxAI/MiniMax-M3"
 SERVED_MODEL_NAME="MiniMax-M3"
-# MiniMax-M2.7 is MoE; pure TP8 not supported — use TP8+EP with expert parallel
+# MiniMax-M3 uses expert parallel
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
 
 # Count GPUs in GPU_ID comma-separated for tensor parallel size
@@ -327,8 +327,8 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --max-model-len "$MAX_MODEL_LEN" \
     --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
     --enable-expert-parallel \
-    --tool-call-parser minimax_m2 \
-    --reasoning-parser minimax_m2_append_think \
+    --tool-call-parser minimax_m3 \
+    --reasoning-parser minimax_m3_append_think \
     --enable-auto-tool-choice \
     --dtype "$DTYPE" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
