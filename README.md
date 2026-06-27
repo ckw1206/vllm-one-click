@@ -2,6 +2,8 @@
 
 Client utilities for testing a remote vLLM OpenAI-compatible API server.
 
+**Currently serving:** FLUX.2 (blackforestlabs/FLUX.2-dev) - Text-to-Image generation model
+
 ## Architecture
 
 ```mermaid
@@ -68,6 +70,9 @@ export GPU_ID="0,1,2,3,4,5,6,7"      # GPUs for tensor parallel
 
 # Run test (connects to localhost via tunnel)
 python test_openai_api.py
+
+# With custom prompt
+python test_openai_api.py --prompt "a cat sitting on a windowsill"
 ```
 
 ### Direct Connection
