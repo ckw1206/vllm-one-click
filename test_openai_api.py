@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quick test for vLLM OpenAI-compatible API.
+Quick test for the OpenAI-compatible image API (diffusers server, default Qwen-Image).
 
 Use SSH tunnel when the server is not on your network:
   ./tunnel_vllm.sh
@@ -8,7 +8,7 @@ Use SSH tunnel when the server is not on your network:
 
 Setup (use a venv to avoid system Python restrictions):
   python3 -m venv .venv
-  source .venv/bin/activate   # Windows: .venv\\Scripts\\activate
+  source .venv/bin/activate   # Windows: .venv\Scripts\activate
   pip install -r requirements.txt
 
 Run:
@@ -33,20 +33,23 @@ except ImportError:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Test vLLM OpenAI-compatible API")
-    p.add_argument("--host", default=os.environ.get("VLLM_HOST", "127.0.0.1"), help="vLLM server (default: 127.0.0.1 for tunnel, or set VLLM_HOST)")
-    p.add_argument("--port", type=int, default=8000, help="vLLM server port")
-    p.add_argument("--model", default=None, help="Model name (default: use server default)")
+    p = argparse.ArgumentParser(description="Test the OpenAI-compatible image API (diffusers/Qwen-Image)")
+    p.add_argument("--host", default=os.environ.get("VLLM_HOST", "127.0.0.1"), help="server host (default: 127.0.0.1 for tunnel, or set VLLM_HOST)")
+    p.add_argument("--port", type=int, default=8000, help="server port")
+    p.add_argument("--model", default=None, help="Model name (default: use server default Qwen-Image)")
+    p.add_argument("--prompt", default="a beautiful landscape with mountains and a lake", help="Image prompt")
     args = p.parse_args()
 
     base_url = f"http://{args.host}:{args.port}/v1"
     print(f"Connecting to {base_url} ...")
+    print(f"Using model: {args.model or 'Qwen-Image (default)'}")
+    print(f"Prompt: {args.prompt}")
 
     api_key = os.environ.get("OPENAI_API_KEY", "not-needed")
     client = OpenAI(
         base_url=base_url,
         api_key=api_key,
-        timeout=120.0,  # vLLM first request can be slow
+        timeout=600.0,  # first request waits for model load; generation can take a while
     )
 
     # Preflight: check if server responds (avoids vague "disconnected" on tunnel/server issues)
@@ -60,15 +63,16 @@ def main():
         print("Check: 1) Tunnel running? ./tunnel_vllm.sh  2) On server: curl -s http://127.0.0.1:8000/v1/models")
         sys.exit(1)
     except AuthenticationError:
-        pass  # 401 on /models is ok; try chat anyway
+        pass  # 401 on /models is ok; try image gen anyway
 
-    # Chat completion
+    # Image generation
     kwargs = {"model": args.model} if args.model else {}
     try:
-        resp = client.chat.completions.create(
-            model=kwargs.get("model") or "MiniMax-M2.1",
-            messages=[{"role": "user", "content": "Say hello in one short sentence."}],
-            max_tokens=64,
+        resp = client.images.generate(
+            model=kwargs.get("model") or "Qwen-Image",
+            prompt=args.prompt,
+            n=1,
+            size="1024x1024",
         )
     except APIConnectionError as e:
         print(f"Connection failed: {e}")
@@ -76,7 +80,7 @@ def main():
             print(f"Cause: {e.__cause__}")
         print("If cause is 'Server disconnected without sending a response':")
         print("  On server run: curl -s http://127.0.0.1:8000/v1/models")
-        print("  If that fails, vLLM may still be loading or check docker logs vllm-openai")
+        print("  If that fails, the model may still be loading; check docker logs image-api")
         if args.host not in ("127.0.0.1", "localhost"):
             print("Tip: use SSH tunnel then connect to 127.0.0.1:")
             print("  ./tunnel_vllm.sh   # in another terminal")
@@ -88,8 +92,9 @@ def main():
         print("  Or set OPENAI_API_KEY to the key the server expects.")
         sys.exit(1)
 
-    content = resp.choices[0].message.content
-    print("Response:", content)
+    image_url = resp.data[0].url
+    print("Image generated successfully!")
+    print(f"Image URL: {image_url}")
     print("Done.")
 
 

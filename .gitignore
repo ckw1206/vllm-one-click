@@ -1,2 +1,8 @@
 .cursor/
 .venv/
+
+# Local secrets / overrides (keep .env.example committed)
+/.env
+
+# Generated images if mounted locally
+generated_images/

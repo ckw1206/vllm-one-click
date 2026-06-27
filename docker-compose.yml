@@ -1,0 +1,54 @@
+# Docker Compose deployment of the diffusers image-generation server.
+# Quick start:
+#   cp .env.example .env        # edit MODEL_PATH / GPU_ID / token as needed
+#   docker compose up -d --build
+#   docker compose logs -f      # wait for "[server] Model ready"
+# OpenAI-compatible API: http://<host>:${PORT}/v1  (POST /v1/images/generations)
+#
+# This is an alternative to install.sh (which is self-contained for curl|sh).
+# It does NOT include the self-destruct timer; stop with `docker compose down`.
+
+services:
+  image-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime}
+    image: diffusers-image-api:latest
+    container_name: image-api
+    restart: unless-stopped
+    ports:
+      - "${HOST_IP:-0.0.0.0}:${PORT:-8000}:8000"
+    environment:
+      MODEL_PATH: ${MODEL_PATH:-Qwen/Qwen-Image}
+      SERVED_MODEL_NAME: ${SERVED_MODEL_NAME:-Qwen-Image}
+      NUM_INFERENCE_STEPS: ${NUM_INFERENCE_STEPS:-50}
+      TRUE_CFG_SCALE: ${TRUE_CFG_SCALE:-4.0}
+      GUIDANCE_SCALE: ${GUIDANCE_SCALE:-4.0}
+      # Pick which GPU(s) the container uses (index within the exposed set).
+      CUDA_VISIBLE_DEVICES: ${GPU_ID:-0}
+      # Optional: gated/private repos need a token (Qwen-Image is public).
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      # Optional: require this bearer key on requests (blank/not-needed = open).
+      API_KEY: ${API_KEY:-}
+      HF_HUB_ENABLE_HF_TRANSFER: "1"
+    volumes:
+      # Persist downloaded weights on the host so restarts don't re-download.
+      - ${HF_CACHE:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    shm_size: "16gb"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      # 200 from /health means the process is up (it answers even while the model loads).
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s

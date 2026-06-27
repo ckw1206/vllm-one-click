@@ -1,0 +1,15 @@
+services:
+  openai-proxy:
+    image: nginx:alpine
+    container_name: openai-proxy
+    restart: unless-stopped
+    ports:
+      - "${LISTEN_PORT:-8000}:8000"
+    environment:
+      - DOWNSTREAM_HOST=${DOWNSTREAM_HOST:?err}
+      - DOWNSTREAM_PORT=${DOWNSTREAM_PORT:-8000}
+      - LISTEN_PORT=${LISTEN_PORT:-8000}
+    volumes:
+      - ./nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+    command: |
+      /bin/sh -c "envsubst '$$DOWNSTREAM_HOST $$DOWNSTREAM_PORT $$LISTEN_PORT' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf && nginx -g 'daemon off;'"
