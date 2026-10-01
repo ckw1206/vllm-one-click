@@ -53,7 +53,8 @@ On the remote server:
 # Optional: customize settings
 export VLLM_HOST_IP="<server-ip>"   # to bind on specific interface
 export PORT="8000"                   # API port
-export GPU_ID="0,1,2,3,4,5,6,7"      # GPUs for tensor parallel
+export GPU_ID="0,1,2,3,4,5,6,7"      # selected GPUs; must be a valid TP size for MiniMax-M2.7
+# 6 GPUs are invalid for this model and will fail with an AssertionError at startup.
 
 ./install.sh
 ```

@@ -262,9 +262,8 @@ else
         echo "[WARN] No GPU detected or supported by Docker. vLLM may not start or may run very slowly on CPU-only."
     fi
 fi
-
 # --- Main vLLM config ---
-GPU_ID="0,1,2,3,4,5,6,7"
+GPU_ID="${GPU_ID:-0,1,2,3,4,5,6,7}"
 PORT=8000
 # Default: bind on all interfaces (0.0.0.0). Set VLLM_HOST_IP to bind to a specific IP instead.
 if [ -n "$VLLM_HOST_IP" ] && [ "$VLLM_HOST_IP" != "0.0.0.0" ]; then
@@ -278,10 +277,27 @@ GPU_MEMORY_UTILIZATION=0.92
 DTYPE="bfloat16"
 MODEL_PATH="MiniMaxAI/MiniMax-M2.7"
 SERVED_MODEL_NAME="MiniMax-M2.7"
+# MiniMax-M2.7 is MoE; pure TP8 not supported — use TP8+EP with expert parallel.
+# The model requires a tensor-parallel size that evenly divides its KV-head layout,
+# so a 6-GPU setup will assert at startup. Fail early with a clear message instead.
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai:latest}"
 
-# Robust GPU count: filter blank/whitespace-only entries so trailing commas don't inflate the count
-TENSOR_PARALLEL_SIZE=$(printf '%s' "$GPU_ID" | tr ',' '\n' | grep -c '[^[:space:]]')
+# Robust GPU count: filter blank/whitespace-only entries so trailing commas don't inflate the count.
+TENSOR_PARALLEL_SIZE=$(printf '%s\n' "$GPU_ID" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | grep -c '[^[:space:]]')
+
+if [ "$TENSOR_PARALLEL_SIZE" -lt 1 ]; then
+    echo "[ERROR] GPU_ID must contain at least one GPU index. Current value: ${GPU_ID}"
+    exit 1
+fi
+
+case "$TENSOR_PARALLEL_SIZE" in
+    1|2|4|8)
+        ;;
+    *)
+        echo "[ERROR] Invalid GPU_ID=${GPU_ID}. MiniMax-M2.7 does not support tensor-parallel size=${TENSOR_PARALLEL_SIZE} and will fail with an AssertionError at startup. Use a supported list such as 0,1,2,3,4,5,6,7 (recommended), 0,1,2,3, or another valid divisor for this model."
+        exit 1
+        ;;
+esac
 
 prompt_for_token
 
@@ -296,6 +312,7 @@ eval docker run --rm -d $DOCKER_RUNTIME_ARGS --name "$VLLM_CONTAINER_NAME" \
     --env "HUGGING_FACE_HUB_TOKEN=${_HF_TOKEN_SAFE}" \
     --env "VLLM_API_KEY=not-needed" \
     --env "VLLM_FLOAT32_MATMUL_PRECISION=high" \
+    --env "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
     $PORT_BIND \
     --ipc=host \
     "$VLLM_IMAGE" \
